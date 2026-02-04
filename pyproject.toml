@@ -1,20 +1,30 @@
 [project]
-name = "polars-streaming-csv-decompression"
+name = "polars-zarr"
 version = "0.1.0"
-description = "Polars IO plugin for reading compressed CSV/TSV files in a streaming fashion"
+description = "Polars IO plugin for reading Zarr v3 arrays as DataFrames"
 readme = "README.md"
 authors = [
     { name = "Gert Hulselmans", email = "hulselmansgert@gmail.com" }
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "polars >= 1.22.0",
-    "xopen",
+    "zarr >= 3.0.8",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 88
