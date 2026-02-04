@@ -1,82 +1,147 @@
-# Polars IO plugin for reading compressed CSV/TSV files in a streaming fashion
+# Polars IO plugin for reading Zarr v3 arrays
 
-This plugin provides a way to read compressed CSV/TSV files in a streaming fashion for usage with [Polars](https://pola.rs/).
+This plugin provides a way to read [Zarr v3](https://zarr.dev/) arrays and groups as [Polars](https://pola.rs/) DataFrames.
 
-Currently, [Polars](https://pola.rs/) decompresses compressed CSV/TSV files completely in memory
-(when using `pl.read_csv("file.csv.gz")` or `pl.scan_csv("file.csv.gz")`) before trying to parse them, which results in
-a lot of memory usage when reading large compressed CSV/TSV files (several GBs to 100s of GBs) as common in e.g. bioinformatics.
+[Zarr](https://zarr.dev/) is a format for storing chunked, compressed, N-dimensional arrays, designed for use in parallel computing. This plugin enables reading Zarr data directly into Polars LazyFrames, supporting lazy evaluation with predicate and projection pushdown.
 
-This plugin provides a way to read compressed CSV/TSV files in a streaming fashion, where the file is decompressed and
-parsed in chunks. This results in a much lower overall memory usage when reading large compressed CSV/TSV files.
+## Features
 
-As it is mainly intended for reading large compressed CSV/TSV files produced by bioinformatics tools, records are
-assumed to be separated by `eol_char` (=`"\n"` by default) and embedded `eol_char` in fields are not expected. The last
-record also should end in `eol_char`. If those conditions are not met, reading such files could give corrupt data.
+- **Lazy reading**: Uses Polars' `register_io_source` for lazy evaluation with query optimization
+- **Chunked streaming**: Reads data in chunks matching Zarr's chunk structure for memory efficiency
+- **Multiple array types**:
+  - 1D arrays: Read as single-column DataFrames
+  - 2D arrays: Read as DataFrames where rows correspond to the first dimension
+  - Groups with multiple 1D arrays: Each array becomes a column
+- **Predicate pushdown**: Filter operations are pushed down to reduce memory usage
+- **Projection pushdown**: Only requested columns are read from disk
 
-It can also be used for decoding CSV files with a different character encoding than `utf8` and/or for decoding CSV files for
-which not all bytes can be decoded in that encoding. Compared with `read_csv`, the decoding will require a lower amount of
-total memory.
+## Requirements
 
-Streaming decompression is handled by [xopen](https://github.com/pycompression/xopen/), which supports the following compression
-formats and backends and automatically selects the best backend available on the system:
-  - gzip (`.gz`):
-    - [python-isal](https://github.com/pycompression/python-isal)
-    - [python-zlib-ng](https://github.com/pycompression/python-zlib-ng)
-    - [pigz](https://zlib.net/pigz/) (a parallel version of gzip)
-    - [gzip](https://www.gnu.org/software/gzip/)
-  - bzip2 (`.bz2`):
-    - [pbzip2](http://compression.great-site.net/pbzip2/) (parallel bzip2)
-  - xz (`.xz`):
-    - [xz](https://github.com/tukaani-project/xz)
-  - Zstandard (`.zst`) (optional)":
-    - [zstd](https://github.com/facebook/zstd)
-    - [zstdandard](https://github.com/indygreg/python-zstandard): Install with `pip install xopen[zstd]`
-  - fallback to Python’s built-in functions (`gzip.open`, `lzma.open`, `bz2.open`) if none of the other methods can be
-    used.
-
+- Python >= 3.11
+- Polars >= 1.22.0
+- Zarr >= 3.0.8
+- NumPy
 
 ## Installation
 
 ```bash
-pip install git+https://github.com/ghuls/polars_streaming_csv_decompression.git
+pip install polars-zarr
+```
+
+Or install from source:
+
+```bash
+pip install git+https://github.com/ghuls/polars-zarr.git
 ```
 
 ## Usage
 
+### Reading a 2D array
+
 ```python
-import polars as pl
-import polars_streaming_csv_decompression
+import numpy as np
+import polars_zarr
+import zarr
 
-# Read compressed CSV file in a streaming fashion.
-(
-    polars_streaming_csv_decompression.streaming_csv(
-        "my_big_file.csv.gz"
-    )  # lazy, doesn't do a thing
-    .select(
-        ["a", "c"]
-    )  # select only 2 columns (other columns will not be read)
-    .filter(
-        pl.col("a") > 10
-    )  # the filter is pushed down the scan, so less data is read into memory
-    .head(100)  # constrain number of returned results to 100
+# Create a sample zarr array
+z = zarr.create_array(
+    store="my_data.zarr",
+    shape=(1000, 5),
+    chunks=(100, 5),
+    dtype="float64",
 )
+z[:] = np.random.randn(1000, 5)
 
+# Read lazily with polars_zarr
+lf = polars_zarr.scan_zarr("my_data.zarr")
 
-# Read CSV file with non-utf8 encoding in a streaming fashion.
-(
-    polars_streaming_csv_decompression.streaming_csv(
-        "file_encoded_in_windows-1252.csv",
-        encoding="windows-1252",
-    )
-    .head()
-)
-
-# Read CSV file with non-utf8 encoding where not all bytes can be decoded in a streaming fashion.
-(
-    polars_streaming_csv_decompression.streaming_csv(
-        "file_encoded_in_windows-1252_but_not_all_bytes_can_be_decoded.csv",
-        encoding="windows-1252-lossy",
-    )
-    .head()
+# Apply transformations - filter and projection are pushed down
+result = (
+    lf
+    .select(["0", "2"])  # Only read columns 0 and 2
+    .filter(pl.col("0") > 0)  # Filter rows where column 0 is positive
+    .head(100)
+    .collect()
 )
 ```
+
+### Reading with custom column names
+
+```python
+# Read with custom column names
+df = polars_zarr.scan_zarr(
+    "my_data.zarr",
+    column_names=["a", "b", "c", "d", "e"]
+).collect()
+```
+
+### Reading a zarr group with multiple arrays
+
+```python
+import zarr
+import numpy as np
+
+# Create a zarr group with multiple arrays
+root = zarr.open_group("my_group.zarr", mode="w")
+root.create_array("id", data=np.arange(100), chunks=(20,))
+root.create_array("value", data=np.random.randn(100), chunks=(20,))
+root.create_array("label", data=np.random.randint(0, 10, size=100), chunks=(20,))
+
+# Read the group - each array becomes a column
+df = polars_zarr.scan_zarr("my_group.zarr").collect()
+print(df.columns)  # ['id', 'value', 'label']
+```
+
+### Limiting rows
+
+```python
+# Read only the first 50 rows
+df = polars_zarr.scan_zarr("my_data.zarr", n_rows=50).collect()
+```
+
+## API Reference
+
+### `scan_zarr`
+
+```python
+def scan_zarr(
+    source: str | Path,
+    *,
+    column_names: Sequence[str] | None = None,
+    rechunk: bool = False,
+    n_rows: int | None = None,
+) -> pl.LazyFrame:
+```
+
+**Parameters:**
+
+- `source`: Path to a Zarr array or group
+- `column_names`: Optional list of column names. For 2D arrays, specifies names for each column. For groups, this is ignored (array names are used)
+- `rechunk`: Reallocate to contiguous memory when all chunks are parsed
+- `n_rows`: Stop reading after `n_rows` rows
+
+**Returns:** A Polars LazyFrame
+
+## Supported Data Types
+
+| NumPy dtype | Polars dtype |
+|-------------|--------------|
+| int8        | Int8         |
+| int16       | Int16        |
+| int32       | Int32        |
+| int64       | Int64        |
+| uint8       | UInt8        |
+| uint16      | UInt16       |
+| uint32      | UInt32       |
+| uint64      | UInt64       |
+| float16     | Float32      |
+| float32     | Float32      |
+| float64     | Float64      |
+| bool        | Boolean      |
+| datetime64  | Datetime     |
+| timedelta64 | Duration     |
+| str/bytes   | String       |
+
+## License
+
+MIT
